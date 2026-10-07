@@ -1,0 +1,113 @@
+# Reusable CI for Node / TypeScript projects.
+#
+# - Detects the package manager from the lockfile (pnpm-lock.yaml, yarn.lock, package-lock.json).
+# - Installs with the frozen lockfile.
+# - Runs the lint, typecheck, test and build scripts, but only the ones that exist in package.json.
+#   Nothing is invented: a repo without a "test" script simply skips that step.
+#
+# Called from a repo's own ci.yml; the resulting check is named "<caller job> / test".
+name: node-ci
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory containing package.json
+        type: string
+        default: "."
+      node-version:
+        description: Node.js version (ignored if the directory has .nvmrc or .node-version)
+        type: string
+        default: "22"
+      pnpm-version:
+        description: pnpm version, only needed when package.json has no "packageManager" field
+        type: string
+        default: ""
+      scripts:
+        description: Space-separated package.json scripts to run, in order, if present
+        type: string
+        default: "lint typecheck test build"
+      build-env:
+        description: |
+          Extra KEY=value lines exported before the scripts run. Use this for
+          non-secret placeholder values that a build needs (e.g. NEXT_PUBLIC_* URLs).
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect package manager
+        id: pm
+        run: |
+          if [ -f pnpm-lock.yaml ]; then echo "pm=pnpm" >> "$GITHUB_OUTPUT"; echo "lock=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+          elif [ -f yarn.lock ]; then echo "pm=yarn" >> "$GITHUB_OUTPUT"; echo "lock=yarn.lock" >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ]; then echo "pm=npm" >> "$GITHUB_OUTPUT"; echo "lock=package-lock.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::No lockfile found in '$PWD'. Commit package-lock.json / pnpm-lock.yaml / yarn.lock so CI installs are reproducible."
+            exit 1
+          fi
+          if [ -f .nvmrc ]; then echo "version-file=${{ inputs.working-directory }}/.nvmrc" >> "$GITHUB_OUTPUT"
+          elif [ -f .node-version ]; then echo "version-file=${{ inputs.working-directory }}/.node-version" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up pnpm
+        if: steps.pm.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ inputs.pnpm-version }}
+          package_json_file: ${{ inputs.working-directory }}/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.pm.outputs.version-file == '' && inputs.node-version || '' }}
+          node-version-file: ${{ steps.pm.outputs.version-file }}
+          cache: ${{ steps.pm.outputs.pm }}
+          cache-dependency-path: ${{ inputs.working-directory }}/${{ steps.pm.outputs.lock }}
+
+      - name: Install dependencies
+        env:
+          PM: ${{ steps.pm.outputs.pm }}
+        run: |
+          case "$PM" in
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            npm)  npm ci ;;
+          esac
+
+      - name: Export build env
+        if: inputs.build-env != ''
+        env:
+          BUILD_ENV: ${{ inputs.build-env }}
+        run: printf '%s\n' "$BUILD_ENV" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' >> "$GITHUB_ENV"
+
+      - name: Run scripts (${{ inputs.scripts }})
+        env:
+          PM: ${{ steps.pm.outputs.pm }}
+          SCRIPTS: ${{ inputs.scripts }}
+        run: |
+          for s in $SCRIPTS; do
+            cmd=$(node -p "(require('./package.json').scripts || {})['$s'] || ''")
+            if [ -z "$cmd" ]; then
+              echo "::notice::No '$s' script in package.json, skipping"
+              continue
+            fi
+            if [ "$s" = "test" ] && echo "$cmd" | grep -q "no test specified"; then
+              echo "::notice::'test' is the npm placeholder, skipping"
+              continue
+            fi
+            echo "::group::$PM run $s"
+            "$PM" run "$s"
+            echo "::endgroup::"
+          done
