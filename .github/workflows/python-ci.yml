@@ -32,9 +32,9 @@ on:
         type: string
         default: "0.16.10"
       test-command:
-        description: Test command (run inside the working directory)
+        description: Test command (run inside the working directory). `python -m pytest` also puts the working directory on sys.path, matching local runs.
         type: string
-        default: "pytest"
+        default: "python -m pytest"
       test-env:
         description: Extra KEY=value lines exported before tests (non-secret placeholders only)
         type: string
