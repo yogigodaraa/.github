@@ -54,6 +54,11 @@ jobs:
       python-version: "3.12"
 ```
 
+Useful Python inputs: `requirements` (which requirements files to install, e.g.
+`requirements-optimized.txt`), `test-command`, `test-env` and `ruff-version` (pinned by default).
+Ruff uses the repo's own `ruff.toml` / `[tool.ruff]` config. Newer ruff releases enable more rules
+by default, so each repo should declare its rule set explicitly.
+
 The status check that branch protection sees is named `<caller job> / test`,
 e.g. `web / test` or `backend / test`. Keep the caller job ids stable.
 

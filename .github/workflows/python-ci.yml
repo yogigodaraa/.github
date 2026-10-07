@@ -19,10 +19,18 @@ on:
         description: Python version
         type: string
         default: "3.12"
+      requirements:
+        description: Space-separated requirements files to install, if they exist (pip projects only)
+        type: string
+        default: "requirements.txt requirements-dev.txt"
       lint:
-        description: Run `ruff check`
+        description: Run `ruff check` (uses the repo's ruff.toml / pyproject.toml config)
         type: boolean
         default: true
+      ruff-version:
+        description: Pinned ruff version, so lint results don't change underneath you
+        type: string
+        default: "0.16.10"
       test-command:
         description: Test command (run inside the working directory)
         type: string
@@ -74,13 +82,16 @@ jobs:
           cache-dependency-path: |
             ${{ inputs.working-directory }}/requirements*.txt
             ${{ inputs.working-directory }}/pyproject.toml
+            ${{ inputs.working-directory }}/setup.py
 
       - name: Install (pip)
         if: steps.detect.outputs.tool == 'pip'
+        env:
+          REQUIREMENTS: ${{ inputs.requirements }}
         run: |
           python -m pip install --upgrade pip
           installed=0
-          for f in requirements.txt requirements-dev.txt; do
+          for f in $REQUIREMENTS; do
             if [ -f "$f" ]; then pip install -r "$f"; installed=1; fi
           done
           if [ -f pyproject.toml ] && grep -qE '^\[(project|tool\.poetry)\]' pyproject.toml; then
@@ -102,8 +113,9 @@ jobs:
         if: inputs.lint
         env:
           TOOL: ${{ steps.detect.outputs.tool }}
+          RUFF_VERSION: ${{ inputs.ruff-version }}
         run: |
-          if [ "$TOOL" = uv ]; then uvx ruff check .; else pip install ruff && ruff check .; fi
+          if [ "$TOOL" = uv ]; then uvx "ruff@$RUFF_VERSION" check .; else pip install "ruff==$RUFF_VERSION" && ruff check .; fi
 
       - name: Test
         env:
