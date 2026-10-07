@@ -1,0 +1,120 @@
+# Reusable CI for Python projects.
+#
+# - uv.lock present  -> astral-sh/setup-uv, `uv sync --frozen`, commands run via `uv run`.
+# - otherwise        -> actions/setup-python with pip cache; installs requirements-dev.txt,
+#                       requirements.txt, and/or the project itself from pyproject.toml.
+# - Lints with ruff (respects the repo's ruff config) and tests with pytest.
+#
+# Called from a repo's own ci.yml; the resulting check is named "<caller job> / test".
+name: python-ci
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory containing requirements.txt / pyproject.toml
+        type: string
+        default: "."
+      python-version:
+        description: Python version
+        type: string
+        default: "3.12"
+      lint:
+        description: Run `ruff check`
+        type: boolean
+        default: true
+      test-command:
+        description: Test command (run inside the working directory)
+        type: string
+        default: "pytest"
+      test-env:
+        description: Extra KEY=value lines exported before tests (non-secret placeholders only)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect tooling
+        id: detect
+        run: |
+          if [ -f uv.lock ]; then echo "tool=uv" >> "$GITHUB_OUTPUT"; else echo "tool=pip" >> "$GITHUB_OUTPUT"; fi
+
+      # ---- uv projects ---------------------------------------------------
+      - name: Set up uv
+        if: steps.detect.outputs.tool == 'uv'
+        uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ inputs.python-version }}
+          enable-cache: true
+          cache-dependency-glob: ${{ inputs.working-directory }}/uv.lock
+
+      - name: Install (uv)
+        if: steps.detect.outputs.tool == 'uv'
+        run: uv sync --frozen --all-extras --dev
+
+      # ---- pip projects --------------------------------------------------
+      - name: Set up Python
+        if: steps.detect.outputs.tool == 'pip'
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            ${{ inputs.working-directory }}/requirements*.txt
+            ${{ inputs.working-directory }}/pyproject.toml
+
+      - name: Install (pip)
+        if: steps.detect.outputs.tool == 'pip'
+        run: |
+          python -m pip install --upgrade pip
+          installed=0
+          for f in requirements.txt requirements-dev.txt; do
+            if [ -f "$f" ]; then pip install -r "$f"; installed=1; fi
+          done
+          if [ -f pyproject.toml ] && grep -qE '^\[(project|tool\.poetry)\]' pyproject.toml; then
+            pip install -e ".[dev]" || pip install -e .
+            installed=1
+          fi
+          if [ "$installed" = 0 ]; then
+            echo "::warning::No requirements.txt or installable pyproject.toml found"
+          fi
+
+      # ---- checks --------------------------------------------------------
+      - name: Export test env
+        if: inputs.test-env != ''
+        env:
+          TEST_ENV: ${{ inputs.test-env }}
+        run: printf '%s\n' "$TEST_ENV" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' >> "$GITHUB_ENV"
+
+      - name: Lint (ruff)
+        if: inputs.lint
+        env:
+          TOOL: ${{ steps.detect.outputs.tool }}
+        run: |
+          if [ "$TOOL" = uv ]; then uvx ruff check .; else pip install ruff && ruff check .; fi
+
+      - name: Test
+        env:
+          TOOL: ${{ steps.detect.outputs.tool }}
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: |
+          # $TEST_COMMAND is intentionally unquoted so it can carry arguments.
+          # shellcheck disable=SC2086
+          if [ "$TOOL" = uv ]; then
+            uv run --frozen $TEST_COMMAND
+          else
+            python -c "import pytest" 2>/dev/null || pip install pytest
+            $TEST_COMMAND
+          fi
